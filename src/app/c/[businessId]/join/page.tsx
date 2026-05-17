@@ -59,21 +59,19 @@ export default function ClientJoinPage() {
 
       if (type === "apple") {
         if (data.demo) {
-          // Demo mode: show instructions
-          console.log("Demo pass data:", data.passData);
+          setWalletType("apple");
+          setStep("success");
+        } else if (data.passUrl) {
+          window.location.href = data.passUrl; // iOS opens Wallet automatically
           setWalletType("apple");
           setStep("success");
         } else {
-          // Real: the response is a .pkpass binary — create blob download
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          window.location.href = url; // iOS opens Wallet automatically
           setWalletType("apple");
           setStep("success");
         }
       } else {
-        if (data.saveUrl) {
-          // Google Wallet: redirect to save URL
+        if (!data.demo && data.saveUrl) {
+          // Only open Google Pay URL when we have a real signed JWT
           window.open(data.saveUrl, "_blank");
         }
         setWalletType("google");
