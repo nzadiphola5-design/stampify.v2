@@ -103,10 +103,6 @@ async function ensureLoyaltyClass(
     id: fullClassId,
     issuerName: "Stampify",
     programName: businessName,
-    programLogo: {
-      sourceUri: { uri: `${APP_URL}/icon-192.png` },
-      contentDescription: { defaultValue: { language: "fr", value: businessName } },
-    },
     hexBackgroundColor: "#6366f1",
     reviewStatus: "UNDER_REVIEW",
   };

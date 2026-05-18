@@ -59,7 +59,6 @@ export async function GET() {
       programName: "Test",
       hexBackgroundColor: "#6366f1",
       reviewStatus: "UNDER_REVIEW",
-      programLogo: { sourceUri: { uri: "https://stampify-v2.vercel.app/icon-192.png" }, contentDescription: { defaultValue: { language: "fr", value: "Stampify" } } },
     }),
   });
   const createData = await createRes.json();
