@@ -2,13 +2,9 @@ import { NextResponse } from "next/server";
 
 function getCredentials() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!b64) return { error: "GOOGLE_SERVICE_ACCOUNT_JSON is missing" };
-  try {
-    const json = Buffer.from(b64, "base64").toString("utf-8");
-    return JSON.parse(json);
-  } catch {
-    try { return JSON.parse(b64); } catch { return { error: "Cannot parse credentials" }; }
-  }
+  if (!b64) return null;
+  try { return JSON.parse(Buffer.from(b64, "base64").toString("utf-8")); }
+  catch { try { return JSON.parse(b64); } catch { return null; } }
 }
 
 async function signJWT(payload: object, privateKeyPem: string): Promise<string> {
@@ -16,56 +12,60 @@ async function signJWT(payload: object, privateKeyPem: string): Promise<string> 
   const header = { alg: "RS256", typ: "JWT" };
   const signingInput = `${encode(header)}.${encode(payload)}`;
   const pemContents = privateKeyPem.replace(/-----BEGIN PRIVATE KEY-----/, "").replace(/-----END PRIVATE KEY-----/, "").replace(/\s/g, "");
-  const keyBuffer = Buffer.from(pemContents, "base64");
-  const cryptoKey = await crypto.subtle.importKey("pkcs8", keyBuffer, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const cryptoKey = await crypto.subtle.importKey("pkcs8", Buffer.from(pemContents, "base64"), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", cryptoKey, Buffer.from(signingInput));
   return `${signingInput}.${Buffer.from(signature).toString("base64url")}`;
 }
 
 export async function GET() {
   const results: Record<string, any> = {};
-
-  // 1. Check env vars
-  results.env = {
-    issuer_id: process.env.GOOGLE_WALLET_ISSUER_ID ? "✅ set" : "❌ missing",
-    class_id: process.env.GOOGLE_WALLET_CLASS_ID ? "✅ set" : "❌ missing",
-    service_account: process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ set" : "❌ missing",
-  };
-
-  // 2. Parse credentials
   const creds = getCredentials();
-  if (creds.error) { results.credentials = `❌ ${creds.error}`; return NextResponse.json(results); }
-  results.credentials = { client_email: creds.client_email ?? "missing", has_private_key: !!creds.private_key };
+  const issuerId = process.env.GOOGLE_WALLET_ISSUER_ID || "";
+  const classId = process.env.GOOGLE_WALLET_CLASS_ID || "stampify-loyalty";
+  const fullClassId = `${issuerId}.${classId}`;
 
-  // 3. Get OAuth token
+  results.config = { issuerId, classId, fullClassId };
+
+  if (!creds) return NextResponse.json({ error: "Cannot parse credentials" });
+
+  // Get OAuth token
+  let accessToken = "";
   try {
     const now = Math.floor(Date.now() / 1000);
     const jwtPayload = { iss: creds.client_email, sub: creds.client_email, aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600, scope: "https://www.googleapis.com/auth/wallet_object.issuer" };
-    const signedJwt = await signJWT(jwtPayload, creds.private_key);
+    const signed = await signJWT(jwtPayload, creds.private_key);
     const res = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: signedJwt }),
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: signed }),
     });
-    const tokenData = await res.json();
-    if (tokenData.access_token) {
-      results.oauth = "✅ Access token obtained";
+    const data = await res.json();
+    if (data.access_token) { accessToken = data.access_token; results.oauth = "✅ Token OK"; }
+    else { results.oauth = `❌ ${JSON.stringify(data)}`; return NextResponse.json(results); }
+  } catch (e: any) { results.oauth = `❌ ${e.message}`; return NextResponse.json(results); }
 
-      // 4. Check loyalty class
-      const issuerId = process.env.GOOGLE_WALLET_ISSUER_ID!;
-      const classId = process.env.GOOGLE_WALLET_CLASS_ID!;
-      const fullClassId = `${issuerId}.${classId}`;
-      const classRes = await fetch(`https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass/${encodeURIComponent(fullClassId)}`, {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` },
-      });
-      const classData = await classRes.json();
-      results.loyalty_class = classRes.ok ? `✅ Class exists: ${classData.id}` : `❌ Class not found: ${JSON.stringify(classData.error)}`;
-    } else {
-      results.oauth = `❌ Token failed: ${JSON.stringify(tokenData)}`;
-    }
-  } catch (e: any) {
-    results.oauth = `❌ Exception: ${e.message}`;
-  }
+  const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
 
-  return NextResponse.json(results, { status: 200 });
+  // Try to list classes for this issuer
+  const listRes = await fetch(`https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass?issuerId=${issuerId}`, { headers });
+  const listData = await listRes.json();
+  results.list_classes = listRes.ok ? `✅ ${JSON.stringify(listData).substring(0, 200)}` : `❌ ${listRes.status}: ${JSON.stringify(listData.error)}`;
+
+  // Try to create the class
+  const createRes = await fetch(`https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass`, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      id: fullClassId,
+      issuerName: "Stampify",
+      programName: "Test",
+      hexBackgroundColor: "#6366f1",
+      reviewStatus: "UNDER_REVIEW",
+      programLogo: { sourceUri: { uri: "https://stampify-v2.vercel.app/icon-192.png" }, contentDescription: { defaultValue: { language: "fr", value: "Stampify" } } },
+    }),
+  });
+  const createData = await createRes.json();
+  if (createRes.ok) results.create_class = `✅ Class created: ${createData.id}`;
+  else if (createRes.status === 409) results.create_class = `✅ Class already exists (409 conflict)`;
+  else results.create_class = `❌ ${createRes.status}: ${JSON.stringify(createData.error)}`;
+
+  return NextResponse.json(results);
 }
