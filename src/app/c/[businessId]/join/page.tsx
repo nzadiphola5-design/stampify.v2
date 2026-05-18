@@ -37,22 +37,25 @@ export default function ClientJoinPage() {
     setError(null);
     try {
       const supabase = createClient();
-      const { data: card, error: cardErr } = await supabase.from("loyalty_cards").insert({
+      const newCardId = crypto.randomUUID();
+
+      const { error: cardErr } = await supabase.from("loyalty_cards").insert({
+        id: newCardId,
         business_id: biz.id,
         customer_name: name,
         phone: contactType === "phone" ? contact : null,
         email: contactType === "email" ? contact : null,
-      }).select().single();
+      });
 
-      if (cardErr || !card) { setError("Erreur lors de la création. Réessayez."); setLoading(false); return; }
+      if (cardErr) { setError("Erreur lors de la création. Réessayez."); setLoading(false); return; }
 
       if (biz.mode === "stamps") {
-        await supabase.from("stamp_states").insert({ card_id: card.id, business_id: biz.id, current_stamps: 0, goal_stamps: biz.goal, total_rewards_given: 0 });
+        await supabase.from("stamp_states").insert({ card_id: newCardId, business_id: biz.id, current_stamps: 0, goal_stamps: biz.goal, total_rewards_given: 0 });
       } else {
-        await supabase.from("points_states").insert({ card_id: card.id, business_id: biz.id, current_points: 0, total_points_earned: 0, total_rewards_given: 0 });
+        await supabase.from("points_states").insert({ card_id: newCardId, business_id: biz.id, current_points: 0, total_points_earned: 0, total_rewards_given: 0 });
       }
 
-      setCardId(card.id);
+      setCardId(newCardId);
       setLoading(false);
       setStep("wallet");
     } catch {
@@ -81,7 +84,6 @@ export default function ClientJoinPage() {
         setWalletType("google"); setStep("success");
       }
 
-      // Update card with wallet type
       const supabase = createClient();
       await supabase.from("loyalty_cards").update({ wallet_type: type, pass_serial: data.objectId ?? data.passSerial ?? null }).eq("id", cardId);
     } catch {
@@ -101,10 +103,12 @@ export default function ClientJoinPage() {
     <div className="min-h-screen bg-dark-950 flex items-center justify-center px-4">
       <div className="text-center">
         <p className="text-white font-semibold text-lg mb-2">Programme introuvable</p>
-        <p className="text-dark-400 text-sm">Ce lien n'est plus valide.</p>
+        <p className="text-dark-400 text-sm">Ce lien n&apos;est plus valide.</p>
       </div>
     </div>
   );
+
+  const bizInitial = biz.name.charAt(0).toUpperCase();
 
   return (
     <div className="min-h-screen bg-dark-950 flex flex-col items-center justify-center px-4 py-8">
@@ -112,6 +116,17 @@ export default function ClientJoinPage() {
       <div className="fixed inset-0 bg-hero-gradient pointer-events-none" />
 
       <div className="relative w-full max-w-sm">
+        {/* Business branding header */}
+        <div className="flex items-center gap-3 mb-6 justify-center">
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-brand-500 to-accent-purple flex items-center justify-center shadow-glow flex-shrink-0">
+            <span className="text-white font-bold text-lg">{bizInitial}</span>
+          </div>
+          <div>
+            <p className="text-white font-semibold text-lg leading-tight">{biz.name}</p>
+            <p className="text-dark-400 text-xs">{biz.type} · {biz.city}</p>
+          </div>
+        </div>
+
         {/* Card preview */}
         <div className="wallet-card p-5 mb-6 animate-float">
           <div className="flex items-center justify-between mb-4">
