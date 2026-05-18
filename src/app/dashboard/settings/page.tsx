@@ -1,11 +1,12 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Stamp, Store, CreditCard, QrCode, Download, Check,
   Shield, Zap, AlertTriangle, Upload, TrendingUp,
   Loader2, ExternalLink, Palette, Eye, Copy, CheckCheck
 } from "lucide-react";
-import { mockBusiness } from "@/lib/mock-data";
+import { useBusiness } from "@/lib/supabase/business-context";
+import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import WalletMockups from "@/components/ui/WalletMockups";
@@ -14,24 +15,26 @@ import { QRCodeCanvas } from "qrcode.react";
 const sections = ["Programme", "Commerce", "Carte", "Plan", "QR Code"];
 
 export default function SettingsPage() {
-  const biz = mockBusiness;
+  const { business, refresh } = useBusiness();
   const [active, setActive] = useState("Programme");
   const [saved, setSaved] = useState(false);
   const [form, setForm] = useState({
-    name: biz.name,
-    type: biz.type,
-    city: biz.city,
-    goal: biz.goal,
-    reward: biz.reward_description,
-    mode: biz.mode,
+    name: "", type: "", city: "", goal: 10, reward: "", mode: "stamps" as "stamps" | "points",
   });
+
+  useEffect(() => {
+    if (business) {
+      setForm({ name: business.name, type: business.type, city: business.city, goal: business.goal, reward: business.reward_description, mode: business.mode });
+      setCardLogoLetter(business.name.charAt(0).toUpperCase());
+    }
+  }, [business]);
 
   const [planLoading, setPlanLoading] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const joinUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/c/${biz.id}/join`
-    : `https://stampify.vercel.app/c/${biz.id}/join`;
+  const joinUrl = business
+    ? (typeof window !== "undefined" ? `${window.location.origin}/c/${business.id}/join` : `https://stampify-v2.vercel.app/c/${business.id}/join`)
+    : "";
 
   const handleCopyLink = async () => {
     await navigator.clipboard.writeText(joinUrl);
@@ -45,19 +48,25 @@ export default function SettingsPage() {
     const url = canvas.toDataURL("image/png");
     const a = document.createElement("a");
     a.href = url;
-    a.download = `qrcode-${biz.name.toLowerCase().replace(/\s+/g, "-")}.png`;
+    a.download = `qrcode-${(business?.name ?? "commerce").toLowerCase().replace(/\s+/g, "-")}.png`;
     a.click();
   };
 
   // Card customization state
   const [cardColor, setCardColor] = useState("#6366f1");
   const [cardBg, setCardBg] = useState("#0f172a");
-  const [cardLogoLetter, setCardLogoLetter] = useState(biz.name.charAt(0).toUpperCase());
+  const [cardLogoLetter, setCardLogoLetter] = useState("");
   const [cardPreviewMode, setCardPreviewMode] = useState<"apple" | "google">("apple");
-  const currentPlan = "growth"; // In prod: fetch from Supabase
+  const currentPlan = business?.plan ?? "starter";
 
   const handleSave = async () => {
-    await new Promise(r => setTimeout(r, 600));
+    if (!business) return;
+    const supabase = createClient();
+    await supabase.from("businesses").update({
+      name: form.name, type: form.type, city: form.city,
+      goal: form.goal, reward_description: form.reward,
+    }).eq("id", business.id);
+    await refresh();
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -134,9 +143,9 @@ export default function SettingsPage() {
 
             <div className="p-4 bg-brand-500/10 border border-brand-500/20 rounded-xl flex items-center justify-between mb-5">
               <div className="flex items-center gap-3">
-                {biz.mode === "stamps" ? <Stamp size={20} className="text-brand-400" /> : <TrendingUp size={20} className="text-cyan-400" />}
+                {form.mode === "stamps" ? <Stamp size={20} className="text-brand-400" /> : <TrendingUp size={20} className="text-cyan-400" />}
                 <div>
-                  <p className="font-medium text-white">{biz.mode === "stamps" ? "Mode Tampons" : "Mode Points"}</p>
+                  <p className="font-medium text-white">{form.mode === "stamps" ? "Mode Tampons" : "Mode Points"}</p>
                   <p className="text-xs text-dark-400">Mode actuel de votre programme</p>
                 </div>
               </div>
