@@ -77,6 +77,12 @@ export default function ClientJoinPage() {
       });
       const data = await res.json();
 
+      if (!res.ok || data.error) {
+        setError(`Erreur wallet: ${data.details || data.error || "inconnue"}`);
+        setWalletLoading(null);
+        return;
+      }
+
       if (type === "apple") {
         setWalletType("apple"); setStep("success");
       } else {
@@ -86,8 +92,8 @@ export default function ClientJoinPage() {
 
       const supabase = createClient();
       await supabase.from("loyalty_cards").update({ wallet_type: type, pass_serial: data.objectId ?? data.passSerial ?? null }).eq("id", cardId);
-    } catch {
-      setError("Impossible de générer la carte. Réessayez.");
+    } catch (e: any) {
+      setError(`Impossible de générer la carte: ${e?.message || "erreur réseau"}`);
     } finally {
       setWalletLoading(null);
     }

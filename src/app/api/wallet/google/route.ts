@@ -7,33 +7,97 @@ function getCredentials() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!b64 || b64.includes("BASE64")) return null;
   try {
-    return JSON.parse(Buffer.from(b64, "base64").toString("utf-8"));
+    const json = Buffer.from(b64, "base64").toString("utf-8");
+    return JSON.parse(json);
   } catch {
-    return null;
+    // Maybe it's raw JSON, not base64
+    try {
+      return JSON.parse(b64);
+    } catch {
+      return null;
+    }
   }
 }
 
-async function getAuthHeaders(credentials: any): Promise<Record<string, string>> {
-  const { GoogleAuth } = await import("google-auth-library");
-  const auth = new GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/wallet_object.issuer"],
+// Sign JWT using Web Crypto API (no external dependency issues)
+async function signJWT(payload: object, privateKeyPem: string): Promise<string> {
+  const header = { alg: "RS256", typ: "JWT" };
+  const encode = (obj: object) =>
+    Buffer.from(JSON.stringify(obj)).toString("base64url");
+
+  const signingInput = `${encode(header)}.${encode(payload)}`;
+
+  // Import PEM private key
+  const pemContents = privateKeyPem
+    .replace(/-----BEGIN PRIVATE KEY-----/, "")
+    .replace(/-----END PRIVATE KEY-----/, "")
+    .replace(/\s/g, "");
+  const keyBuffer = Buffer.from(pemContents, "base64");
+
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBuffer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    Buffer.from(signingInput)
+  );
+
+  const sig = Buffer.from(signature).toString("base64url");
+  return `${signingInput}.${sig}`;
+}
+
+async function getAccessToken(credentials: any): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const jwtPayload = {
+    iss: credentials.client_email,
+    sub: credentials.client_email,
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+    scope: "https://www.googleapis.com/auth/wallet_object.issuer",
+  };
+
+  const signedJwt = await signJWT(jwtPayload, credentials.private_key);
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: signedJwt,
+    }),
   });
-  const client = await auth.getClient();
-  return (await client.getRequestHeaders()) as Record<string, string>;
+
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error(`OAuth failed: ${JSON.stringify(data)}`);
+  }
+  return data.access_token;
 }
 
 async function ensureLoyaltyClass(
-  credentials: any,
+  accessToken: string,
   issuerId: string,
   classId: string,
   businessName: string
 ) {
   const fullClassId = `${issuerId}.${classId}`;
-  const headers = await getAuthHeaders(credentials);
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+  };
 
-  const check = await fetch(`${WALLET_API}/loyaltyClass/${fullClassId}`, { headers });
-  if (check.ok) return; // already exists
+  const check = await fetch(`${WALLET_API}/loyaltyClass/${encodeURIComponent(fullClassId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (check.ok) return;
 
   const loyaltyClass = {
     id: fullClassId,
@@ -41,63 +105,22 @@ async function ensureLoyaltyClass(
     programName: businessName,
     programLogo: {
       sourceUri: { uri: `${APP_URL}/icon-192.png` },
-      contentDescription: {
-        defaultValue: { language: "fr-CA", value: businessName },
-      },
+      contentDescription: { defaultValue: { language: "fr", value: businessName } },
     },
     hexBackgroundColor: "#6366f1",
     reviewStatus: "UNDER_REVIEW",
   };
 
-  await fetch(`${WALLET_API}/loyaltyClass`, {
+  const createRes = await fetch(`${WALLET_API}/loyaltyClass`, {
     method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(loyaltyClass),
   });
-}
 
-function buildLoyaltyObject({
-  issuerId, classId, objectId, customerName, businessName,
-  stamps, goal, reward, mode, points, cardId,
-}: {
-  issuerId: string; classId: string; objectId: string; customerName: string;
-  businessName: string; stamps: number; goal: number; reward: string;
-  mode: string; points: number; cardId: string;
-}) {
-  const loyaltyPoints =
-    mode === "stamps"
-      ? {
-          label: "Tampons",
-          balance: { int: stamps },
-          localizedLabel: { defaultValue: { language: "fr", value: "Tampons" } },
-        }
-      : {
-          label: "Points",
-          balance: { int: points },
-          localizedLabel: { defaultValue: { language: "fr", value: "Points" } },
-        };
-
-  return {
-    id: objectId,
-    classId: `${issuerId}.${classId}`,
-    state: "ACTIVE",
-    accountId: cardId,
-    accountName: customerName,
-    loyaltyPoints,
-    textModulesData: [
-      { header: "Récompense", body: reward, id: "reward" },
-      {
-        header: mode === "stamps" ? "Progression" : "Solde",
-        body: mode === "stamps" ? `${stamps}/${goal} tampons` : `${points} points`,
-        id: "progress",
-      },
-    ],
-    barcode: {
-      type: "QR_CODE",
-      value: `stampify://card/${cardId}`,
-      alternateText: customerName,
-    },
-  };
+  if (!createRes.ok) {
+    const err = await createRes.text();
+    throw new Error(`Class creation failed: ${err}`);
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -115,43 +138,66 @@ export async function POST(req: NextRequest) {
   const credentials = getCredentials();
   const issuerId = process.env.GOOGLE_WALLET_ISSUER_ID || "";
   const classId = process.env.GOOGLE_WALLET_CLASS_ID || "stampify-loyalty";
-  const objectId = `${issuerId}.${businessId}-${cardId}`;
 
-  // Demo mode — not configured
   if (!credentials || !issuerId || issuerId.includes("YOUR")) {
     return NextResponse.json({
       demo: true,
-      message: "Google Wallet not configured. Add GOOGLE_* env vars to Vercel.",
+      message: "Google Wallet not configured.",
     });
   }
 
   try {
-    // Create class if missing
-    await ensureLoyaltyClass(credentials, issuerId, classId, businessName);
+    const accessToken = await getAccessToken(credentials);
+    await ensureLoyaltyClass(accessToken, issuerId, classId, businessName);
 
-    const loyaltyObject = buildLoyaltyObject({
-      issuerId, classId, objectId, customerName, businessName,
-      stamps, goal, reward, mode, points, cardId,
-    });
+    const objectId = `${issuerId}.${businessId.replace(/-/g, "")}-${cardId.replace(/-/g, "")}`;
+    const fullClassId = `${issuerId}.${classId}`;
 
-    const { default: jwt } = await import("jsonwebtoken");
-    const claims = {
+    const loyaltyPoints =
+      mode === "stamps"
+        ? { label: "Tampons", balance: { int: stamps } }
+        : { label: "Points", balance: { int: points } };
+
+    const loyaltyObject = {
+      id: objectId,
+      classId: fullClassId,
+      state: "ACTIVE",
+      accountId: cardId,
+      accountName: customerName,
+      loyaltyPoints,
+      textModulesData: [
+        { header: "Récompense", body: reward, id: "reward" },
+        {
+          header: mode === "stamps" ? "Progression" : "Solde",
+          body: mode === "stamps" ? `${stamps}/${goal} tampons` : `${points} points`,
+          id: "progress",
+        },
+      ],
+      barcode: {
+        type: "QR_CODE",
+        value: `stampify://card/${cardId}`,
+        alternateText: customerName,
+      },
+    };
+
+    const now = Math.floor(Date.now() / 1000);
+    const jwtPayload = {
       iss: credentials.client_email,
       aud: "google",
       origins: [APP_URL],
       typ: "savetowallet",
       payload: { loyaltyObjects: [loyaltyObject] },
-      iat: Math.floor(Date.now() / 1000),
+      iat: now,
     };
 
-    const token = jwt.sign(claims, credentials.private_key, { algorithm: "RS256" });
+    const token = await signJWT(jwtPayload, credentials.private_key);
     const saveUrl = `https://pay.google.com/gp/v/save/${token}`;
 
     return NextResponse.json({ saveUrl, objectId });
   } catch (err: any) {
-    console.error("Google Wallet error:", err);
+    console.error("Google Wallet error:", err?.message || err);
     return NextResponse.json(
-      { error: "Failed to generate Google Wallet pass", details: err.message },
+      { error: "Failed to generate Google Wallet pass", details: err?.message || String(err) },
       { status: 500 }
     );
   }
